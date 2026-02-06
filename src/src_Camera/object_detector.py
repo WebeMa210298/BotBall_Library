@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+import math
 import os, sys
 sys.path.append("/usr/lib")
 
@@ -347,18 +348,51 @@ class CameraObjectDetector:
         cv2.imwrite(path, corrected)
 
     def _detect_shape(self, contour) -> str:
-        '''
-        ==== NEEDS IMPROVEMENT ====
-        detect the shape of the object with the contour
+        """
+        Detect the shape of a contour.
 
         Args:
-            contour: the circumference of the object
+            contour: Contour of the object (from cv2.findContours).
 
         Returns:
-            str: the shape of the object
-        '''
+            Shape name as a string (e.g. "triangle", "rectangle", "pentagon",
+            "circle", "pipe", or "other").
+        """
+        
+        area = cv2.contourArea(contour)
+        if area < 50:
+            return "other"
+
         peri = cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, 0.04 * peri, True)
+        if peri <= 0:
+            return "other"
+
+        # --- Basic geometry ---
+        circularity = (4.0 * math.pi * area) / (peri * peri)  # 1.0 is perfect circle
+
+        x, y, w, h = cv2.boundingRect(contour)
+        ar_bbox = float(w) / float(h) if h > 0 else 0.0
+        ar_bbox = max(ar_bbox, 1.0 / ar_bbox) if ar_bbox > 0 else ar_bbox  # force >= 1
+
+        rect = cv2.minAreaRect(contour)  # ((cx,cy),(rw,rh),angle)
+        (rw, rh) = rect[1]
+        if rw <= 0 or rh <= 0:
+            return "other"
+        ar_rot = max(rw, rh) / min(rw, rh)
+
+        hull = cv2.convexHull(contour)
+        hull_area = cv2.contourArea(hull) if hull is not None else 0
+        solidity = area / hull_area if hull_area > 0 else 0.0
+
+        # --- PIPE detection ---
+        # Side view: elongated shape (high aspect ratio), fairly solid (not super jagged)
+        # End view: it's basically a circle (high circularity)
+        # Tune these numbers for your camera distance/background.
+        if (ar_rot >= 2.2 and solidity >= 0.85 and area >= 300):
+            return "pipe"
+
+        # --- Polygon detection ---
+        approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
         vertices = len(approx)
 
         if vertices == 3:
@@ -367,8 +401,9 @@ class CameraObjectDetector:
             return "rectangle"
         elif vertices == 5:
             return "pentagon"
-        else:
-            return "circle" if cv2.isContourConvex(approx) else "other"
+
+        # If not circular enough and not a clean polygon:
+        return "other"
 
     def _get_color_ranges(self) -> dict:
         '''
@@ -443,16 +478,18 @@ class CameraObjectDetector:
     # x----------x find methods x------------x
 
     def find_by_shape(self, shape_name: str) -> bool:
-        '''
-        ==== NEEDS IMPROVEMENT ====
-        takes one picture and analyzes, if the desired shape name is found
+        """
+        Take a picture, find the biggest object, detect its shape, and check if it
+        matches `shape_name`.
 
         Args:
-            shape_name (str): the name of the shape (see all available shape names in _detect_shape())
+            shape_name: Shape name to look for (e.g. "triangle", "rectangle",
+                "circle", "pipe"; see all available shape names in _detect_shape()).
 
         Returns:
-            If the shape was found (True) or not (False)
-        '''
+            True if the detected shape matches `shape_name`, otherwise False.
+        """
+    
         frame = self._capture_good_frame(min_brightness=100, timeout=8)
         if frame is None:
             log("Could not create a solid picture", important=True)
@@ -462,23 +499,18 @@ class CameraObjectDetector:
         roi, contour = self._extract_largest_object(corrected)
 
         found = False
-        if contour is not None:
-            approx = cv2.approxPolyDP(contour, 0.04 * cv2.arcLength(contour, True), True)
-            vertices = len(approx)
+        detected = None
 
-            if shape_name == "triangle" and vertices == 3:
-                found = True
-            elif shape_name == "rectangle" and vertices == 4:
-                found = True
-            elif shape_name == "circle" and vertices > 5:
-                found = True
+        if contour is not None:
+            detected = self._detect_shape(contour)
+            found = (detected == shape_name)
 
         if found:
             frame_marked = self._draw_circle_on_contour(frame, contour)
             self._save_result(frame_marked, f"shape_{shape_name}", mode="find", status="FOUND")
         else:
-            self._save_result(frame, f"shape_{shape_name}", mode="find", status="NOT_FOUND")
-
+            # include what you detected for debugging
+            self._save_result(frame, f"shape_{shape_name}_det_{detected}", mode="find", status="NOT_FOUND")
 
         return found
 
